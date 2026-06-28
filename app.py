@@ -46,31 +46,6 @@ def _cached_company_info(tickers: tuple[str, ...]) -> dict:
     return get_company_info(list(tickers))
 
 
-@st.cache_data(show_spinner=False, ttl=6 * 3600)
-def _cached_screen(
-    tickers: tuple[str, ...],
-    period: str,
-    min_correlation: float,
-    max_candidates: int,
-    max_pvalue: float,
-    z_window: int,
-    kalman_delta: float,
-    kalman_obs_cov: float,
-) -> list[PairResult]:
-    prices = _cached_prices(tickers, period)
-    if prices.empty:
-        return []
-    return screen_pairs(
-        prices,
-        min_correlation=min_correlation,
-        max_candidates=max_candidates,
-        max_pvalue=max_pvalue,
-        z_window=z_window,
-        kalman_delta=kalman_delta,
-        kalman_obs_cov=kalman_obs_cov,
-    )
-
-
 def _ranking_frame(results: list[PairResult], info: dict) -> pd.DataFrame:
     rows = []
     for i, r in enumerate(results, start=1):
@@ -221,38 +196,86 @@ def main() -> None:
             )
         run = st.button("Run screen", type="primary", use_container_width=True)
 
-    if run or "results" not in st.session_state:
+    if run:
+        st.session_state["ran"] = True
+        diag: dict = {}
         try:
             with st.spinner("Fetching the NYSE universe…"):
                 universe = _cached_universe(universe_limit)
         except Exception as exc:
-            st.error(f"Could not fetch the NYSE listing: {exc}")
-            st.session_state["results"] = []
             universe = []
+            diag["error"] = f"Could not fetch the NYSE listing: {exc}"
 
+        diag["requested"] = len(universe)
         if universe:
             with st.spinner(
-                f"Downloading prices for {len(universe)} NYSE tickers and screening "
-                "pairs… (first run can take a few minutes)"
+                f"Downloading prices for {len(universe)} NYSE tickers… "
+                "(first run can take a few minutes; Yahoo may throttle)"
             ):
                 prices = _cached_prices(tuple(universe), period)
-                st.session_state["_prices"] = prices
-                if prices.empty:
-                    st.error(
-                        "No price data returned from Yahoo Finance. Check "
-                        "connectivity and try again."
-                    )
-                    st.session_state["results"] = []
-                else:
-                    st.session_state["results"] = _cached_screen(
-                        tuple(prices.columns), period,
-                        min_correlation, max_candidates, max_pvalue,
-                        z_window, kalman_delta, kalman_obs_cov,
-                    )
+            st.session_state["_prices"] = prices
+            diag["downloaded"] = int(prices.shape[1])
 
+            if not prices.empty:
+                with st.spinner(
+                    f"Screening {prices.shape[1]} tickers for cointegrated pairs…"
+                ):
+                    st.session_state["results"] = screen_pairs(
+                        prices,
+                        min_correlation=min_correlation,
+                        max_candidates=max_candidates,
+                        max_pvalue=max_pvalue,
+                        z_window=z_window,
+                        kalman_delta=kalman_delta,
+                        kalman_obs_cov=kalman_obs_cov,
+                    )
+            else:
+                st.session_state["results"] = []
+        else:
+            st.session_state["results"] = []
+        st.session_state["diag"] = diag
+
+    if not st.session_state.get("ran"):
+        st.info(
+            "Adjust the settings in the sidebar and press **Run screen** to scan "
+            "the NYSE for cointegrated pairs."
+        )
+        return
+
+    # --- Report on the most recent run, surfacing any data problems clearly. ---
+    diag = st.session_state.get("diag", {})
     results: list[PairResult] = st.session_state.get("results", [])
+
+    if diag.get("error"):
+        st.error(diag["error"])
+        return
+
+    requested = diag.get("requested", 0)
+    downloaded = diag.get("downloaded", 0)
+
+    if downloaded == 0:
+        st.error(
+            "**Yahoo Finance returned no price data.** Its servers frequently "
+            "rate-limit shared cloud IPs (HTTP 429), which is the most likely "
+            "cause on Streamlit Cloud. Wait a minute and press **Run screen** "
+            "again, or lower **Max tickers to scan** in the sidebar for a "
+            "lighter request."
+        )
+        return
+
+    if requested and downloaded < 0.5 * requested:
+        st.warning(
+            f"Only **{downloaded} of {requested}** tickers returned data — Yahoo "
+            "likely throttled the rest. Coverage (and results) may be thin; retry "
+            "in a minute for a fuller scan."
+        )
+
     if not results:
-        st.info("Adjust the settings and press **Run screen** to find cointegrated pairs.")
+        st.warning(
+            f"Downloaded **{downloaded}** tickers but found **no cointegrated "
+            "pairs** at these settings. Try lowering **Min return correlation** "
+            "(e.g. 0.70–0.80) or raising **Max cointegration p-value**."
+        )
         return
 
     best = top_pairs(results, n=10)
@@ -268,8 +291,9 @@ def main() -> None:
         use_container_width=True,
     )
     st.caption(
-        f"Screened {len(results)} cointegrated pairs out of the NYSE universe; "
-        "ranked by ascending Engle-Granger p-value. Lower is stronger."
+        f"Downloaded {downloaded} of {requested} NYSE tickers; found "
+        f"{len(results)} cointegrated pairs, ranked by ascending Engle-Granger "
+        "p-value (lower is stronger)."
     )
 
     st.subheader("Pair detail")

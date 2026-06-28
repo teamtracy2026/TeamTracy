@@ -23,8 +23,9 @@ CACHE_DIR = Path(os.environ.get("TEAMTRACY_CACHE_DIR", ".cache"))
 # How long a cached download stays fresh. Daily bars don't change intraday, so
 # a few hours is plenty and keeps reruns instant.
 CACHE_TTL_SECONDS = int(os.environ.get("TEAMTRACY_CACHE_TTL", str(6 * 3600)))
-# Tickers per yfinance batch download.
-BATCH_SIZE = int(os.environ.get("TEAMTRACY_BATCH_SIZE", "200"))
+# Tickers per yfinance batch download. Smaller batches are friendlier to
+# Yahoo's rate limiter on shared cloud IPs.
+BATCH_SIZE = int(os.environ.get("TEAMTRACY_BATCH_SIZE", "100"))
 
 
 def _chunks(seq: list[str], size: int):
@@ -91,21 +92,12 @@ def load_prices(
 
     # Download in batches: a single yf.download call with thousands of symbols
     # is fragile (partial failures, huge memory spikes). Batching keeps each
-    # request reasonable and lets us tolerate per-batch failures.
+    # request reasonable and lets us tolerate per-batch failures. Yahoo also
+    # rate-limits shared cloud IPs (e.g. Streamlit Cloud), so each batch is
+    # retried with backoff and a single-threaded fallback.
     frames: list[pd.DataFrame] = []
     for batch in _chunks(tickers, BATCH_SIZE):
-        try:
-            raw = yf.download(
-                batch,
-                period=period,
-                interval=interval,
-                auto_adjust=True,
-                progress=False,
-                threads=True,
-            )
-        except Exception:
-            continue
-        close = _extract_close(raw, batch)
+        close = _download_batch(batch, period, interval)
         if not close.empty:
             frames.append(close)
 
@@ -123,6 +115,39 @@ def load_prices(
             pass  # Caching is best-effort; never fail a load over it.
 
     return prices
+
+
+def _download_batch(
+    batch: list[str], period: str, interval: str, retries: int = 3
+) -> pd.DataFrame:
+    """Download one batch of tickers, retrying on transient/rate-limit failures.
+
+    Yahoo frequently returns HTTP 429 ("Too Many Requests") to data-center IPs.
+    We retry with exponential backoff and, on the final attempt, drop threading
+    (single-threaded requests are gentler and sometimes get through when the
+    threaded path is throttled).
+    """
+    for attempt in range(retries):
+        threaded = attempt < retries - 1
+        try:
+            raw = yf.download(
+                batch,
+                period=period,
+                interval=interval,
+                auto_adjust=True,
+                progress=False,
+                threads=threaded,
+            )
+            close = _extract_close(raw, batch)
+            # Keep only columns that actually came back with data.
+            close = close.dropna(axis=1, how="all")
+            if not close.empty:
+                return close
+        except Exception as exc:  # pragma: no cover - network dependent
+            print(f"[data] batch download failed (attempt {attempt + 1}): {exc}")
+        time.sleep(1.5 * (attempt + 1))
+    print(f"[data] giving up on batch of {len(batch)} tickers after {retries} tries")
+    return pd.DataFrame()
 
 
 def _extract_close(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
