@@ -1,0 +1,19 @@
+# Streamlit configuration used both locally and on Streamlit Community Cloud.
+# Secrets (if ever needed) go in .streamlit/secrets.toml, which is gitignored.
+
+[theme]
+base = "light"
+primaryColor = "#1f77b4"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f7fa"
+font = "sans serif"
+
+[server]
+# Community Cloud sets the port itself; these are sensible local defaults and
+# are harmless when overridden by the platform.
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false

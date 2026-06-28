@@ -49,7 +49,29 @@ The filtered residual `e_t` is the smoothed, mean-reverting spread.
 
 ---
 
-## Quick start
+## Deploy from your browser (no terminal needed)
+
+This app is built to host on **[Streamlit Community Cloud](https://streamlit.io/cloud)**
+straight from this GitHub repo — everything below is done in a browser, so it
+works fine from an iPad with no local setup:
+
+1. Go to **<https://share.streamlit.io>** and click **Sign in with GitHub**,
+   authorising access to this repository.
+2. Click **Create app → Deploy a public app from GitHub**.
+3. Fill in:
+   - **Repository:** `teamtracy2026/TeamTracy`
+   - **Branch:** `claude/nyse-cointegrated-pairs-dashboard-ejohk9` (or `main`
+     once merged)
+   - **Main file path:** `app.py`
+4. (Optional) Under **Advanced settings**, set **Python version** to `3.11`.
+5. Click **Deploy**. Streamlit installs `requirements.txt` and launches the app,
+   giving you a public `https://…streamlit.app` URL.
+
+After that, **every push to the selected branch auto-redeploys** the app — no
+terminal, ever. GitHub Actions (`.github/workflows/ci.yml`) runs the test suite
+on each push so you can see green/red checks in the GitHub UI before it deploys.
+
+## Run locally (optional)
 
 ```bash
 # 1. Install dependencies (a virtualenv is recommended)

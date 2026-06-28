@@ -1,0 +1,33 @@
+name: CI
+
+# Runs the test suite on every push and pull request. The tests use synthetic
+# data only (no network), so this also doubles as a check that requirements.txt
+# installs cleanly — the same install Streamlit Community Cloud performs on deploy.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Matches the Python version selected on Streamlit Community Cloud.
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests
+        run: pytest -q
