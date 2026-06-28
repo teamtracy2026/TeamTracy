@@ -6,32 +6,44 @@ estimate a time-varying hedge ratio and smooth each pair's spread over time.
 
 Cointegrated pairs are the raw material of statistical-arbitrage / pairs-trading
 strategies: two stocks whose prices wander individually but whose *spread* is
-mean-reverting. The dashboard screens a curated universe of liquid NYSE names,
-ranks pairs by the strength of their cointegration, and lets you drill into each
-one's prices, dynamic hedge ratio, smoothed spread and trading-signal z-score.
+mean-reverting. The dashboard scans the **entire NYSE**, ranks pairs by the
+strength of their cointegration, and lets you drill into each one's prices,
+dynamic hedge ratio, smoothed spread, trading-signal z-score, and a backtest.
+
+**Nothing is hard-coded:** the ticker universe is fetched live from the NYSE
+listing directory and company names come from Yahoo Finance.
 
 ---
 
 ## How it works
 
-1. **Universe** (`src/universe.py`) — a curated set of liquid, NYSE-listed large
-   caps grouped by sector (banks, oil, healthcare, retail, …). Screening within
-   sectors keeps the combinatorics manageable and surfaces economically
-   meaningful relationships.
+1. **Universe** (`src/universe.py`) — the full list of NYSE common stocks is
+   fetched at runtime from the official **NASDAQ Trader symbol directory**
+   (`otherlisted.txt`), filtered to Exchange = NYSE and excluding ETFs, test
+   issues and non-common securities (warrants, units, preferreds). No tickers
+   are hard-coded; the universe reflects whatever is currently listed.
 2. **Data** (`src/data.py`) — adjusted close prices are downloaded from Yahoo
-   Finance via `yfinance`, aligned on a common calendar, and cached on disk so
-   the dashboard stays responsive.
-3. **Cointegration screen** (`src/cointegration.py`) — every candidate pair is
-   run through the **Engle-Granger** cointegration test (`statsmodels`). Pairs
-   are ranked by ascending p-value; the lower the p-value, the stronger the
-   evidence of a stationary linear combination.
+   Finance via `yfinance` in batches, aligned on a common calendar, and cached
+   on disk. Company **names and sectors** for the displayed pairs are pulled
+   from Yahoo Finance too (`get_company_info`).
+3. **Cointegration screen** (`src/cointegration.py`) — scanning every pair of an
+   exchange-sized universe is O(N²) and far too slow, so a cheap **correlation
+   pre-filter** (on daily returns) selects the most correlated candidate pairs;
+   only those run the **Engle-Granger** cointegration test (`statsmodels`).
+   Pairs are ranked by ascending p-value — lower means stronger evidence of a
+   stationary linear combination.
 4. **Kalman filter** (`src/kalman.py`) — for each surviving pair we model the
    hedge ratio as a slowly varying hidden state and recover it with a two-state
    Kalman filter (a time-varying linear regression). The filtered residual is
    the **smoothed spread**; its rolling z-score is the trading signal, and we
    also report the mean-reversion **half-life**.
-5. **Dashboard** (`app.py`) — ranks the top 10 pairs in a table and renders an
-   interactive Plotly drill-down (prices, dynamic β, z-score with ±2 bands).
+5. **Backtest** (`src/backtest.py`) — the selected pair is backtested with a
+   dollar-neutral z-score mean-reversion strategy starting from **$100,000**:
+   enter when the spread's z-score is stretched, exit as it reverts. Reports the
+   equity curve, total return, CAGR, Sharpe, max drawdown, trades and win rate.
+6. **Dashboard** (`app.py`) — ranks the top 10 pairs in a table (with stock
+   names) and renders an interactive Plotly drill-down (prices, dynamic β,
+   z-score with ±2 bands) plus the backtest equity curve and drawdown.
 
 ### Why a Kalman filter?
 
@@ -82,8 +94,9 @@ streamlit run app.py
 ```
 
 Then open the local URL Streamlit prints (default <http://localhost:8501>).
-Use the sidebar to choose the history window, restrict to within-sector pairs,
-set the maximum p-value, and tune the Kalman filter, then press **Run screen**.
+Use the sidebar to choose the history window, scan the whole NYSE or cap its
+size, tune the correlation pre-filter and p-value, adjust the Kalman filter and
+backtest settings, then press **Run screen**.
 
 ### Run the tests
 
@@ -105,28 +118,36 @@ TeamTracy/
 ├── app.py                  # Streamlit dashboard
 ├── requirements.txt
 ├── src/
-│   ├── universe.py         # curated NYSE universe by sector
-│   ├── data.py             # Yahoo Finance loading + caching
+│   ├── universe.py         # live NYSE listing (NASDAQ Trader directory)
+│   ├── data.py             # Yahoo Finance prices + names, batched + cached
 │   ├── kalman.py           # Kalman dynamic hedge ratio + half-life
-│   └── cointegration.py    # Engle-Granger screen + ranking
+│   ├── cointegration.py    # correlation pre-filter + Engle-Granger ranking
+│   └── backtest.py         # $100k z-score mean-reversion backtest
 └── tests/
     └── test_pipeline.py    # synthetic-data unit tests
 ```
 
 ## Configuration
 
-| Environment variable     | Default  | Purpose                              |
-| ------------------------ | -------- | ------------------------------------ |
-| `TEAMTRACY_CACHE_DIR`    | `.cache` | Where downloaded prices are cached.  |
-| `TEAMTRACY_CACHE_TTL`    | `21600`  | Cache freshness in seconds (6h).     |
+| Environment variable      | Default  | Purpose                                   |
+| ------------------------- | -------- | ----------------------------------------- |
+| `TEAMTRACY_CACHE_DIR`     | `.cache` | Where downloaded prices/listing are cached. |
+| `TEAMTRACY_CACHE_TTL`     | `21600`  | Price cache freshness in seconds (6h).    |
+| `TEAMTRACY_UNIVERSE_TTL`  | `86400`  | NYSE listing cache freshness (24h).       |
+| `TEAMTRACY_BATCH_SIZE`    | `200`    | Tickers per Yahoo Finance batch download. |
 
 ---
 
 ## Notes & caveats
 
-- The NYSE universe is intentionally a curated large-cap subset, not the full
-  exchange listing — this keeps the all-pairs sweep fast and the statistics
-  meaningful. Extend `src/universe.py` to widen it (keep names NYSE-listed).
+- Scanning the **entire NYSE** is thorough but heavy: the first run downloads
+  history for every listed common stock, which can take a few minutes. Results
+  are cached, so subsequent runs are fast. The sidebar lets you cap the universe
+  size and tune the correlation pre-filter for a quicker scan. The dashboard
+  needs outbound internet to Yahoo Finance and the NASDAQ Trader directory.
+- The backtest is a deliberately simple, transparent model (dollar-neutral
+  sizing, one-bar execution lag, a basis-point cost) — not a production engine.
+  Returns are in-sample and ignore slippage, borrow costs and capacity.
 - Cointegration is estimated in-sample; relationships break down. Treat the
   output as a research starting point.
 - **Research / educational use only. Not investment advice.**

@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.cointegration import screen_pairs
+from src.backtest import backtest_pair
+from src.cointegration import correlation_candidates, screen_pairs
 from src.kalman import half_life, kalman_hedge_ratio
 
 
@@ -67,11 +68,35 @@ def test_screen_ranks_cointegrated_above_random():
 
     prices = pd.DataFrame({"AAA": y, "BBB": x, "CCC": r1, "DDD": r2})
 
-    # within_sector_only=False so every combination is tested on synthetic names.
-    results = screen_pairs(prices, within_sector_only=False, max_pvalue=1.0)
+    # Low correlation floor so every combination is a candidate on synthetic data.
+    results = screen_pairs(prices, min_correlation=0.0, max_pvalue=1.0)
     assert results, "expected at least one screened pair"
 
     # The cointegrated AAA/BBB pair should be the strongest (lowest p-value).
     best = results[0]
     assert {best.y, best.x} == {"AAA", "BBB"}
     assert best.pvalue < 0.05
+
+
+def test_correlation_prefilter_keeps_correlated_pair():
+    y, x = _cointegrated_pair(n=300, seed=5)
+    rng = np.random.default_rng(6)
+    indep = pd.Series(100 + np.cumsum(rng.normal(0, 1, 300)), index=y.index)
+    prices = pd.DataFrame({"AAA": y, "BBB": x, "CCC": indep})
+    # AAA/BBB move together (high return correlation); the prefilter should keep
+    # them and is allowed to drop the uncorrelated pairs.
+    cands = correlation_candidates(prices, min_correlation=0.5, max_candidates=10)
+    assert ("AAA", "BBB") in cands or ("BBB", "AAA") in cands
+
+
+def test_backtest_starts_at_capital_and_compounds():
+    y, x = _cointegrated_pair(n=400, seed=7)
+    kf = kalman_hedge_ratio(y, x)
+    bt = backtest_pair(y, x, kf.zscore, entry=1.5, exit=0.5, initial_capital=100_000)
+    assert len(bt.equity) == len(bt.returns)
+    # Equity compounds from the starting capital.
+    expected_first = 100_000 * (1 + bt.returns.iloc[0])
+    assert bt.equity.iloc[0] == pytest.approx(expected_first, rel=1e-9)
+    assert bt.initial_capital == 100_000
+    assert bt.num_trades >= 0
+    assert -1.0 <= bt.max_drawdown <= 0.0

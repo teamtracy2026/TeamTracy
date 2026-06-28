@@ -1,10 +1,13 @@
 """TeamTracy — NYSE cointegrated pairs dashboard.
 
-Streamlit app that screens a curated NYSE universe for the most strongly
-cointegrated stock pairs (Engle-Granger test), then uses a Kalman filter to
-estimate a time-varying hedge ratio and smooth each pair's spread. The top 10
-pairs are ranked in a table; selecting any pair drills into its prices, dynamic
-hedge ratio, smoothed spread and trading-signal z-score.
+Streamlit app that scans the entire NYSE for the most strongly cointegrated
+stock pairs (Engle-Granger test), then uses a Kalman filter to estimate a
+time-varying hedge ratio and smooth each pair's spread. The top 10 pairs are
+ranked in a table; selecting any pair drills into its prices, dynamic hedge
+ratio, smoothed spread, trading-signal z-score, and a $100k backtest.
+
+The ticker universe is fetched live from the NASDAQ Trader symbol directory and
+company names come from Yahoo Finance — nothing is hard-coded.
 
 Run with:  streamlit run app.py
 """
@@ -16,9 +19,10 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from src.backtest import BacktestResult, backtest_pair
 from src.cointegration import PairResult, screen_pairs, top_pairs
-from src.data import load_prices
-from src.universe import all_tickers
+from src.data import get_company_info, load_prices
+from src.universe import nyse_tickers
 
 st.set_page_config(
     page_title="TeamTracy · NYSE Cointegrated Pairs",
@@ -27,26 +31,39 @@ st.set_page_config(
 )
 
 
+@st.cache_data(show_spinner=False, ttl=24 * 3600)
+def _cached_universe(limit: int | None) -> list[str]:
+    return nyse_tickers(limit=limit)
+
+
 @st.cache_data(show_spinner=False, ttl=6 * 3600)
 def _cached_prices(tickers: tuple[str, ...], period: str) -> pd.DataFrame:
     return load_prices(list(tickers), period=period)
 
 
+@st.cache_data(show_spinner=False, ttl=24 * 3600)
+def _cached_company_info(tickers: tuple[str, ...]) -> dict:
+    return get_company_info(list(tickers))
+
+
 @st.cache_data(show_spinner=False, ttl=6 * 3600)
 def _cached_screen(
+    tickers: tuple[str, ...],
     period: str,
-    within_sector_only: bool,
+    min_correlation: float,
+    max_candidates: int,
     max_pvalue: float,
     z_window: int,
     kalman_delta: float,
     kalman_obs_cov: float,
 ) -> list[PairResult]:
-    prices = _cached_prices(tuple(all_tickers()), period)
+    prices = _cached_prices(tickers, period)
     if prices.empty:
         return []
     return screen_pairs(
         prices,
-        within_sector_only=within_sector_only,
+        min_correlation=min_correlation,
+        max_candidates=max_candidates,
         max_pvalue=max_pvalue,
         z_window=z_window,
         kalman_delta=kalman_delta,
@@ -54,15 +71,19 @@ def _cached_screen(
     )
 
 
-def _ranking_frame(results: list[PairResult]) -> pd.DataFrame:
+def _ranking_frame(results: list[PairResult], info: dict) -> pd.DataFrame:
     rows = []
     for i, r in enumerate(results, start=1):
         hl = r.half_life_bars
+        a_info = info.get(r.y, {})
+        b_info = info.get(r.x, {})
         rows.append(
             {
                 "Rank": i,
                 "Pair": r.label,
-                "Sector": r.sector or "—",
+                "Stock A": a_info.get("name", r.y),
+                "Stock B": b_info.get("name", r.x),
+                "Sector": a_info.get("sector", "—"),
                 "p-value": round(r.pvalue, 5),
                 "Correlation": round(r.correlation, 3),
                 "Hedge ratio β": round(r.beta_last, 3),
@@ -150,9 +171,25 @@ def main() -> None:
             "History window", ["1y", "2y", "3y", "5y"], index=1,
             help="Lookback used for both the cointegration test and the Kalman filter.",
         )
-        within_sector_only = st.checkbox(
-            "Screen within sector only", value=True,
-            help="Faster and more economically meaningful. Uncheck for an all-pairs sweep.",
+        scan_all = st.checkbox(
+            "Scan the entire NYSE", value=True,
+            help="Fetches every NYSE common stock live. Thorough but slower on the "
+                 "first run; results are cached afterwards. Uncheck to cap the size.",
+        )
+        universe_limit = None
+        if not scan_all:
+            universe_limit = st.slider(
+                "Max tickers to scan", 50, 1500, 300, 50,
+                help="Alphabetical cap on the NYSE universe for a faster scan.",
+            )
+        min_correlation = st.slider(
+            "Min return correlation (pre-filter)", 0.5, 0.99, 0.80, 0.01,
+            help="Only the most correlated pairs are tested for cointegration. "
+                 "Higher = fewer candidates, faster scan.",
+        )
+        max_candidates = st.slider(
+            "Max candidate pairs", 100, 5000, 1000, 100,
+            help="Upper bound on how many correlated pairs run the cointegration test.",
         )
         max_pvalue = st.slider(
             "Max cointegration p-value", 0.01, 0.10, 0.05, 0.01,
@@ -172,23 +209,46 @@ def main() -> None:
                 value=1e-3,
                 format_func=lambda v: f"{v:.0e}",
             )
+        with st.expander("Backtest settings"):
+            initial_capital = st.number_input(
+                "Starting capital ($)", min_value=1_000, max_value=10_000_000,
+                value=100_000, step=10_000,
+            )
+            entry_z = st.slider("Entry z-score", 1.0, 3.0, 2.0, 0.1)
+            exit_z = st.slider("Exit z-score", 0.0, 1.5, 0.5, 0.1)
+            cost_bps = st.slider(
+                "Transaction cost (bps per turn)", 0.0, 10.0, 1.0, 0.5,
+            )
         run = st.button("Run screen", type="primary", use_container_width=True)
 
     if run or "results" not in st.session_state:
-        with st.spinner("Downloading prices and screening pairs…"):
-            prices = _cached_prices(tuple(all_tickers()), period)
-            st.session_state["_prices"] = prices
-            if prices.empty:
-                st.error(
-                    "No price data returned from Yahoo Finance. Check connectivity "
-                    "and try again."
-                )
-                st.session_state["results"] = []
-            else:
-                st.session_state["results"] = _cached_screen(
-                    period, within_sector_only, max_pvalue,
-                    z_window, kalman_delta, kalman_obs_cov,
-                )
+        try:
+            with st.spinner("Fetching the NYSE universe…"):
+                universe = _cached_universe(universe_limit)
+        except Exception as exc:
+            st.error(f"Could not fetch the NYSE listing: {exc}")
+            st.session_state["results"] = []
+            universe = []
+
+        if universe:
+            with st.spinner(
+                f"Downloading prices for {len(universe)} NYSE tickers and screening "
+                "pairs… (first run can take a few minutes)"
+            ):
+                prices = _cached_prices(tuple(universe), period)
+                st.session_state["_prices"] = prices
+                if prices.empty:
+                    st.error(
+                        "No price data returned from Yahoo Finance. Check "
+                        "connectivity and try again."
+                    )
+                    st.session_state["results"] = []
+                else:
+                    st.session_state["results"] = _cached_screen(
+                        tuple(prices.columns), period,
+                        min_correlation, max_candidates, max_pvalue,
+                        z_window, kalman_delta, kalman_obs_cov,
+                    )
 
     results: list[PairResult] = st.session_state.get("results", [])
     if not results:
@@ -197,9 +257,13 @@ def main() -> None:
 
     best = top_pairs(results, n=10)
 
+    # Company names/sectors for just the displayed tickers, from Yahoo Finance.
+    shown = sorted({t for r in best for t in (r.y, r.x)})
+    info = _cached_company_info(tuple(shown))
+
     st.subheader("Top 10 cointegrated pairs")
     st.dataframe(
-        _ranking_frame(best),
+        _ranking_frame(best, info),
         hide_index=True,
         use_container_width=True,
     )
@@ -212,6 +276,10 @@ def main() -> None:
     labels = [r.label for r in best]
     choice = st.selectbox("Select a pair to inspect", labels, index=0)
     selected = next(r for r in best if r.label == choice)
+    st.markdown(
+        f"**{info.get(selected.y, {}).get('name', selected.y)}** ({selected.y}) "
+        f"vs **{info.get(selected.x, {}).get('name', selected.x)}** ({selected.x})"
+    )
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Cointegration p-value", f"{selected.pvalue:.4f}")
@@ -239,6 +307,89 @@ def main() -> None:
             *Research/education only — not investment advice.*
             """
         )
+
+    _render_backtest(selected, initial_capital, entry_z, exit_z, cost_bps)
+
+
+def _render_backtest(
+    selected: PairResult,
+    initial_capital: float,
+    entry_z: float,
+    exit_z: float,
+    cost_bps: float,
+) -> None:
+    st.subheader("Backtest")
+    st.caption(
+        f"Z-score mean-reversion on the Kalman spread, dollar-neutral, starting "
+        f"from ${initial_capital:,.0f}. Enter at |z| ≥ {entry_z:g}, exit at "
+        f"|z| ≤ {exit_z:g}. Tune in the sidebar under **Backtest settings**."
+    )
+
+    prices = st.session_state.get("_prices")
+    if prices is None or selected.y not in prices or selected.x not in prices:
+        st.info("Run a screen to backtest the selected pair.")
+        return
+
+    y = prices[selected.y].reindex(selected.kalman.spread.index)
+    x = prices[selected.x].reindex(selected.kalman.spread.index)
+    try:
+        bt = backtest_pair(
+            y, x, selected.kalman.zscore,
+            entry=entry_z, exit=exit_z,
+            initial_capital=float(initial_capital), cost_bps=cost_bps,
+        )
+    except ValueError as exc:
+        st.warning(f"Could not backtest this pair: {exc}")
+        return
+
+    metrics = bt.metrics_dict()
+    row1 = st.columns(5)
+    row2 = st.columns(4)
+    keys = list(metrics.keys())
+    for col, key in zip(row1, keys[:5]):
+        col.metric(key, metrics[key])
+    for col, key in zip(row2, keys[5:]):
+        col.metric(key, metrics[key])
+
+    st.plotly_chart(_equity_figure(bt), use_container_width=True)
+
+    if bt.num_trades == 0:
+        st.info(
+            "No trades were triggered over this window with the current bands. "
+            "Try a lower entry z-score."
+        )
+
+
+def _equity_figure(bt: BacktestResult) -> go.Figure:
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+        row_heights=[0.7, 0.3],
+        subplot_titles=("Equity curve ($)", "Drawdown"),
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=bt.equity.index, y=bt.equity.values, name="Equity",
+            line=dict(color="#1f77b4"),
+        ),
+        row=1, col=1,
+    )
+    fig.add_hline(
+        y=bt.initial_capital, line=dict(color="gray", dash="dash", width=1),
+        row=1, col=1,
+    )
+    drawdown = bt.equity / bt.equity.cummax() - 1.0
+    fig.add_trace(
+        go.Scatter(
+            x=drawdown.index, y=drawdown.values, name="Drawdown",
+            fill="tozeroy", line=dict(color="#d62728"),
+        ),
+        row=2, col=1,
+    )
+    fig.update_yaxes(tickformat=".0%", row=2, col=1)
+    fig.update_layout(
+        height=460, margin=dict(l=40, r=40, t=50, b=40), showlegend=False,
+    )
+    return fig
 
 
 if __name__ == "__main__":

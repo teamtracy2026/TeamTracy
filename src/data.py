@@ -23,6 +23,13 @@ CACHE_DIR = Path(os.environ.get("TEAMTRACY_CACHE_DIR", ".cache"))
 # How long a cached download stays fresh. Daily bars don't change intraday, so
 # a few hours is plenty and keeps reruns instant.
 CACHE_TTL_SECONDS = int(os.environ.get("TEAMTRACY_CACHE_TTL", str(6 * 3600)))
+# Tickers per yfinance batch download.
+BATCH_SIZE = int(os.environ.get("TEAMTRACY_BATCH_SIZE", "200"))
+
+
+def _chunks(seq: list[str], size: int):
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
 
 
 def _cache_path(tickers: list[str], period: str, interval: str) -> Path:
@@ -82,16 +89,30 @@ def load_prices(
             "yfinance is not installed. Run `pip install -r requirements.txt`."
         )
 
-    raw = yf.download(
-        tickers,
-        period=period,
-        interval=interval,
-        auto_adjust=True,
-        progress=False,
-        threads=True,
-    )
+    # Download in batches: a single yf.download call with thousands of symbols
+    # is fragile (partial failures, huge memory spikes). Batching keeps each
+    # request reasonable and lets us tolerate per-batch failures.
+    frames: list[pd.DataFrame] = []
+    for batch in _chunks(tickers, BATCH_SIZE):
+        try:
+            raw = yf.download(
+                batch,
+                period=period,
+                interval=interval,
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+            )
+        except Exception:
+            continue
+        close = _extract_close(raw, batch)
+        if not close.empty:
+            frames.append(close)
 
-    prices = _extract_close(raw, tickers)
+    if not frames:
+        return pd.DataFrame()
+
+    prices = pd.concat(frames, axis=1)
     prices = _clean(prices, min_obs=min_obs)
 
     if use_cache and not prices.empty:
@@ -129,6 +150,8 @@ def _clean(prices: pd.DataFrame, min_obs: int) -> pd.DataFrame:
     if prices.empty:
         return prices
     prices = prices.sort_index()
+    # Drop duplicate columns that can arise from concatenating batches.
+    prices = prices.loc[:, ~prices.columns.duplicated()]
     # Forward-fill isolated gaps (holidays/halts), then require enough history.
     prices = prices.ffill()
     enough = prices.notna().sum() >= min_obs
@@ -136,3 +159,53 @@ def _clean(prices: pd.DataFrame, min_obs: int) -> pd.DataFrame:
     # Trim leading rows where some surviving ticker is still NaN.
     prices = prices.dropna(how="any")
     return prices
+
+
+_INFO_CACHE = CACHE_DIR / "company_info.json"
+
+
+def get_company_info(tickers: list[str]) -> dict[str, dict[str, str]]:
+    """Fetch company name and sector for ``tickers`` from Yahoo Finance.
+
+    Returns ``{ticker: {"name": ..., "sector": ...}}``. Results are cached on
+    disk (keyed by ticker) so we only hit Yahoo's metadata endpoint once per
+    name — this is meant for the handful of tickers actually shown on screen,
+    not the whole universe. Missing fields fall back to the ticker itself.
+    """
+    cache = _load_info_cache()
+    missing = [t for t in tickers if t not in cache]
+
+    if missing and yf is not None:
+        for t in missing:
+            name, sector = t, "—"
+            try:
+                info = yf.Ticker(t).get_info()
+                name = info.get("shortName") or info.get("longName") or t
+                sector = info.get("sector") or "—"
+            except Exception:
+                pass  # Network/parse failure -> fall back to ticker.
+            cache[t] = {"name": str(name), "sector": str(sector)}
+        _save_info_cache(cache)
+
+    return {t: cache.get(t, {"name": t, "sector": "—"}) for t in tickers}
+
+
+def _load_info_cache() -> dict[str, dict[str, str]]:
+    if not _INFO_CACHE.exists():
+        return {}
+    try:
+        import json
+
+        return json.loads(_INFO_CACHE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_info_cache(cache: dict[str, dict[str, str]]) -> None:
+    try:
+        import json
+
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _INFO_CACHE.write_text(json.dumps(cache))
+    except Exception:
+        pass
