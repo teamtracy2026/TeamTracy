@@ -1,8 +1,9 @@
 # 📈 TeamTracy — NYSE Cointegrated Pairs Dashboard
 
-A Streamlit dashboard that finds the **top 10 best cointegrated stock pairs on
-the NYSE**, using **Yahoo Finance** price data and a **Kalman filter** to
-estimate a time-varying hedge ratio and smooth each pair's spread over time.
+A Streamlit app with two dashboards: (1) the **top 10 best cointegrated stock
+pairs on the NYSE**, using **Yahoo Finance** price data and a **Kalman filter**
+to estimate a time-varying hedge ratio and smooth each pair's spread over time;
+and (2) a web-scraped **Teck Resources** performance & predictor dashboard.
 
 Cointegrated pairs are the raw material of statistical-arbitrage / pairs-trading
 strategies: two stocks whose prices wander individually but whose *spread* is
@@ -44,6 +45,29 @@ listing directory and company names come from Yahoo Finance.
 6. **Dashboard** (`app.py`) — ranks the top 10 pairs in a table (with stock
    names) and renders an interactive Plotly drill-down (prices, dynamic β,
    z-score with ±2 bands) plus the backtest equity curve and drawdown.
+
+## Teck Resources dashboard (second page)
+
+A second Streamlit page, **⛏️ Teck Resources** (`pages/1_Teck_Resources.py`),
+web-scrapes and visualises the performance and *predictors* of Teck Resources
+(NYSE: TECK), a diversified base-metals miner:
+
+- **Web-scraped data** (`src/teck.py`) — Teck's price history and a basket of
+  commodity/macro **predictor** proxies (copper miners, metals & mining, energy,
+  gold, the US dollar, Canadian equities, the S&P 500) are scraped from Stooq's
+  CSV endpoint (scrape-friendly, rarely rate-limited), with a yfinance fallback.
+  Recent **headlines** are scraped from the Google News RSS feed.
+- **Performance view** — price with 50/200-day moving averages and volume, key
+  statistics (returns over 1M/3M/YTD/1Y, 52-week range, volatility), and growth
+  of $100 in Teck versus each predictor.
+- **Predictor analysis** — pairwise return correlations, a standardised
+  multi-factor **OLS model** (with R², showing how much of Teck's daily variance
+  the commodity/macro factors explain), and a rolling correlation with the
+  single strongest driver. For a miner these factors dominate company news, so
+  the model typically shows copper/metals as the leading predictors.
+
+Because it's a multipage app, both dashboards run from the same `streamlit run
+app.py` — switch pages from the sidebar.
 
 ### Why a Kalman filter?
 
@@ -115,16 +139,20 @@ genuinely cointegrated pair above independent random walks.
 
 ```
 TeamTracy/
-├── app.py                  # Streamlit dashboard
+├── app.py                     # Streamlit app — NYSE pairs dashboard (home page)
+├── pages/
+│   └── 1_Teck_Resources.py    # Teck performance & predictor dashboard
 ├── requirements.txt
 ├── src/
-│   ├── universe.py         # live NYSE listing (NASDAQ Trader directory)
-│   ├── data.py             # Yahoo Finance prices + names, batched + cached
-│   ├── kalman.py           # Kalman dynamic hedge ratio + half-life
-│   ├── cointegration.py    # correlation pre-filter + Engle-Granger ranking
-│   └── backtest.py         # $100k z-score mean-reversion backtest
+│   ├── universe.py            # live NYSE listing (NASDAQ Trader directory)
+│   ├── data.py               # Yahoo Finance prices + names, batched + cached
+│   ├── kalman.py             # Kalman dynamic hedge ratio + half-life
+│   ├── cointegration.py      # correlation pre-filter + Engle-Granger ranking
+│   ├── backtest.py           # $100k z-score mean-reversion backtest
+│   └── teck.py               # Teck scraping (Stooq/Google News) + predictor model
 └── tests/
-    └── test_pipeline.py    # synthetic-data unit tests
+    ├── test_pipeline.py      # cointegration/Kalman/backtest unit tests
+    └── test_teck.py          # Teck parsing + predictor-analysis tests
 ```
 
 ## Configuration
@@ -134,7 +162,7 @@ TeamTracy/
 | `TEAMTRACY_CACHE_DIR`     | `.cache` | Where downloaded prices/listing are cached. |
 | `TEAMTRACY_CACHE_TTL`     | `21600`  | Price cache freshness in seconds (6h).    |
 | `TEAMTRACY_UNIVERSE_TTL`  | `86400`  | NYSE listing cache freshness (24h).       |
-| `TEAMTRACY_BATCH_SIZE`    | `200`    | Tickers per Yahoo Finance batch download. |
+| `TEAMTRACY_BATCH_SIZE`    | `100`    | Tickers per Yahoo Finance batch download. |
 
 ---
 
