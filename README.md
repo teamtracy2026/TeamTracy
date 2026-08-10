@@ -66,8 +66,31 @@ web-scrapes and visualises the performance and *predictors* of Teck Resources
   single strongest driver. For a miner these factors dominate company news, so
   the model typically shows copper/metals as the leading predictors.
 
-Because it's a multipage app, both dashboards run from the same `streamlit run
-app.py` — switch pages from the sidebar.
+## Anglo-Teck merger & projection (third page)
+
+A third page, **🤝 Anglo-Teck Merger** (`pages/2_Anglo_Teck_Merger.py`), layers
+the September-2025 Anglo American / Teck merger (forming **Anglo Teck**) onto the
+analysis and projects Teck's stock forward (`src/merger.py`):
+
+- **Convergence** — Teck vs Anglo American (US ADR) performance since the
+  announcement, and a rolling correlation showing the two stocks moving together.
+- **Merger-arbitrage spread** — the gap between Teck's price and the deal-implied
+  value (exchange ratio × Anglo price). A negative spread (Teck below deal value)
+  is the classic merger-arb discount; the page annualises the convergence upside
+  over the expected time to close.
+- **Forward projection** — a Monte Carlo (geometric Brownian motion) simulation
+  of Teck's price with percentile fan bands, plus a **scenario blend** that mixes
+  a standalone path against a deal-completion path (Teck converging to the
+  Anglo-linked value), weighted by an adjustable completion probability. Reports
+  a probability-weighted expected price and probability of gain.
+
+> **Deal terms are user-adjustable assumptions, not official figures.** The
+> exchange ratio, completion probability and horizon are sidebar inputs (defaults
+> reflect the announced deal) — verify against Anglo American / Teck filings.
+> Projections are probabilistic and illustrative, **not investment advice**.
+
+Because it's a multipage app, all three dashboards run from the same `streamlit
+run app.py` — switch pages from the sidebar.
 
 ### Why a Kalman filter?
 
@@ -141,7 +164,8 @@ genuinely cointegrated pair above independent random walks.
 TeamTracy/
 ├── app.py                     # Streamlit app — NYSE pairs dashboard (home page)
 ├── pages/
-│   └── 1_Teck_Resources.py    # Teck performance & predictor dashboard
+│   ├── 1_Teck_Resources.py    # Teck performance & predictor dashboard
+│   └── 2_Anglo_Teck_Merger.py # merger analysis + forward projection
 ├── requirements.txt
 ├── src/
 │   ├── universe.py            # live NYSE listing (NASDAQ Trader directory)
@@ -149,10 +173,12 @@ TeamTracy/
 │   ├── kalman.py             # Kalman dynamic hedge ratio + half-life
 │   ├── cointegration.py      # correlation pre-filter + Engle-Granger ranking
 │   ├── backtest.py           # $100k z-score mean-reversion backtest
-│   └── teck.py               # Teck scraping (Stooq/Google News) + predictor model
+│   ├── teck.py               # Teck scraping (Stooq/Google News) + predictor model
+│   └── merger.py             # Anglo-Teck arb spread + Monte Carlo projection
 └── tests/
     ├── test_pipeline.py      # cointegration/Kalman/backtest unit tests
-    └── test_teck.py          # Teck parsing + predictor-analysis tests
+    ├── test_teck.py          # Teck parsing + predictor-analysis tests
+    └── test_merger.py        # merger spread + projection tests
 ```
 
 ## Configuration
